@@ -1,0 +1,366 @@
+library(scTenifoldNet)
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(igraph)
+library(ggrepel)
+library(scales)
+
+set.seed(123)
+
+
+
+targetGene <- "SLC39A10"    
+cellName <- "SEM"            
+expFold <- 2                 
+
+
+
+af <- subset(af, subset = cellType == cellName)
+
+
+
+countMat <- GetAssayData(
+  object = af,
+  assay = "RNA",
+  slot = "counts"
+)
+
+
+
+af <- FindVariableFeatures(
+  object = af,
+  selection.method = "vst",
+  nfeatures = 2000
+)
+
+hvgs <- VariableFeatures(af)
+
+
+
+data <- as.data.frame(
+  countMat[
+    unique(c(targetGene, hvgs)),
+  ]
+)
+
+data <- data[rowSums(data > 0) >= 10, ]
+
+
+
+if(!targetGene %in% rownames(data)){
+  stop(paste0(targetGene," not found!"))
+}
+
+
+
+expr_cells <- sum(data[targetGene, ] > 0)
+
+expr_ratio <- mean(data[targetGene, ] > 0)
+
+expr_mean <- mean(data[targetGene, ])
+
+expr_median <- median(data[targetGene, ])
+
+cat("Gene:", targetGene, "\n")
+cat("Expressing cells:", expr_cells, "\n")
+cat("Expression ratio:", round(expr_ratio*100,2), "%\n")
+cat("Mean count:", round(expr_mean,3), "\n")
+cat("Median count:", round(expr_median,3), "\n")
+
+
+wt_data <- data
+
+
+
+oe_data <- data
+
+idx <- oe_data[targetGene, ] > 0
+
+oe_data[targetGene, idx] <-
+  round(
+    oe_data[targetGene, idx] * expFold
+  )
+
+
+
+rm(af, countMat)
+gc()
+
+
+result <- scTenifoldNet(
+  X = wt_data,
+  Y = oe_data,
+
+  qc = FALSE,
+
+  nc_nNet = 15,
+  nc_nCells = 150,
+  nc_nComp = 5,
+
+  nc_symmetric = FALSE,
+  nc_scaleScores = TRUE,
+
+  td_K = 3,
+  ma_nDim = 20
+)
+
+
+df <- result$diffRegulation
+
+df <- df[df$gene != targetGene, ]
+
+
+
+outTab <- df[df$p.adj < 0.05, ]
+
+write.table(
+  outTab,
+  file = paste0(
+    targetGene,
+    "_",
+    cellName,
+    "_OE_sigDiff.txt"
+  ),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+
+
+top_genes <- head(
+  df[
+    order(abs(df$FC), decreasing = TRUE),
+  ],
+  20
+)
+
+
+
+p1 <- ggplot(
+  top_genes,
+  aes(
+    x = reorder(gene, FC),
+    y = FC
+  )
+) +
+  geom_bar(
+    stat = "identity",
+    fill = "#2E86AB"
+  ) +
+  coord_flip() +
+  labs(
+    title = paste0(
+      "Top 20 Differentially Regulated Genes (",
+      targetGene,
+      " OE in ",
+      cellName,
+      ")"
+    ),
+    x = "Gene",
+    y = "FC"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5
+    )
+  )
+
+pdf(
+  paste0(
+    targetGene,
+    "_",
+    cellName,
+    "_OE_barplot.pdf"
+  ),
+  width = 7,
+  height = 6
+)
+
+print(p1)
+
+dev.off()
+
+
+
+df$log_p.adj <- -log10(df$p.adj + 1e-100)
+
+df$significant <- ifelse(
+  df$p.adj < 0.05,
+  "Significant",
+  "Not significant"
+)
+
+label_genes <- subset(
+  df,
+  p.adj < 0.05
+)
+
+y_upper <- quantile(
+  df$log_p.adj,
+  0.999,
+  na.rm = TRUE
+)
+
+p2 <- ggplot(
+  df,
+  aes(
+    x = Z,
+    y = log_p.adj,
+    color = significant
+  )
+) +
+  geom_point(
+    alpha = 0.7,
+    size = 1
+  ) +
+  scale_color_manual(
+    values = c(
+      "Significant" = "red",
+      "Not significant" = "gray60"
+    )
+  ) +
+  geom_hline(
+    yintercept = -log10(0.05),
+    linetype = "dashed",
+    color = "red"
+  ) +
+  geom_text_repel(
+    data = label_genes,
+    aes(label = gene),
+    size = 3,
+    max.overlaps = 50
+  ) +
+  labs(
+    title = paste0(
+      targetGene,
+      " OE in ",
+      cellName
+    ),
+    x = "Z-score",
+    y = "-log10(adj.P)"
+  ) +
+  theme_classic() +
+  coord_cartesian(
+    ylim = c(
+      0,
+      y_upper
+    )
+  ) +
+  theme(
+    legend.position = "none"
+  )
+
+pdf(
+  paste0(
+    targetGene,
+    "_",
+    cellName,
+    "_OE_volcano.pdf"
+  ),
+  width = 7,
+  height = 6
+)
+
+print(p2)
+
+dev.off()
+
+
+
+sig_count <- table(
+  df$significant
+)
+
+sig_df <- as.data.frame(
+  sig_count
+)
+
+colnames(sig_df) <- c(
+  "category",
+  "count"
+)
+
+sig_df$percentage <- paste0(
+  round(
+    sig_df$count /
+      sum(sig_df$count) * 100,
+    1
+  ),
+  "%"
+)
+
+p3 <- ggplot(
+  sig_df,
+  aes(
+    x = "",
+    y = count,
+    fill = category
+  )
+) +
+  geom_bar(
+    stat = "identity",
+    width = 1
+  ) +
+  geom_text(
+    aes(label = percentage),
+    position = position_stack(
+      vjust = 0.5
+    ),
+    size = 4
+  ) +
+  coord_polar(
+    "y",
+    start = 0
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Significant" = "red",
+      "Not significant" = "lightgray"
+    )
+  ) +
+  labs(
+    title = paste0(
+      "Proportion of Significant Genes (",
+      targetGene,
+      " OE)"
+    )
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    panel.grid = element_blank(),
+    plot.title = element_text(
+      hjust = 0.5
+    )
+  )
+
+pdf(
+  paste0(
+    targetGene,
+    "_",
+    cellName,
+    "_OE_pie.pdf"
+  ),
+  width = 6,
+  height = 5
+)
+
+print(p3)
+
+dev.off()
+
+
+write.csv(
+  df,
+  file = paste0(
+    targetGene,
+    "_",
+    cellName,
+    "_OE_allGenes.csv"
+  ),
+  row.names = FALSE
+)
